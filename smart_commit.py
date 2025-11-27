@@ -46,18 +46,81 @@ class GitAnalyzer:
         total_deletions = 0
         processed_paths = set()
         
-        # Get staged files (modified, deleted, renamed)
-        for item in self.repo.index.diff("HEAD"):
-            file_path = item.a_path if item.a_path else item.b_path
+        # Use git diff --cached to get all staged files (more reliable)
+        try:
+            result = subprocess.run(
+                ['git', 'diff', '--cached', '--name-status'],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=10
+            )
+            staged_changes = [line.strip() for line in result.stdout.split('\n') if line.strip()]
+        except Exception:
+            staged_changes = []
+        
+        # Check if this is a fresh repository with no commits
+        try:
+            head_commit = self.repo.head.commit
+            has_commits = True
+        except (ValueError, git.BadName):
+            # No commits yet, all files in index are new
+            has_commits = False
+            head_commit = None
+        
+        # Process staged changes from git diff --cached
+        for change_line in staged_changes:
+            if not change_line:
+                continue
+            
+            # Parse git diff --cached output: status\tfile_path
+            parts = change_line.split('\t', 1)
+            if len(parts) != 2:
+                continue
+            
+            status = parts[0]
+            file_path = parts[1]
+            
             if file_path in processed_paths:
                 continue
             processed_paths.add(file_path)
             
-            change_type = self._get_change_type(item)
+            # Determine change type from status
+            if status.startswith('A'):
+                change_type = "added"
+            elif status.startswith('D'):
+                change_type = "deleted"
+            elif status.startswith('R') or status.startswith('C'):
+                change_type = "renamed"
+            else:
+                change_type = "modified"
             
-            # Get diff stats
-            diff_index = self.repo.index.diff("HEAD", paths=[file_path])
-            additions, deletions = self._count_changes(diff_index)
+            # Get diff stats using git diff --cached
+            try:
+                stats_result = subprocess.run(
+                    ['git', 'diff', '--cached', '--numstat', file_path],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                    timeout=10
+                )
+                # Format: additions\tdeletions\tfile
+                stats_line = stats_result.stdout.strip()
+                if stats_line:
+                    stats_parts = stats_line.split('\t')
+                    if len(stats_parts) >= 2:
+                        try:
+                            additions = int(stats_parts[0]) if stats_parts[0] != '-' else 0
+                            deletions = int(stats_parts[1]) if stats_parts[1] != '-' else 0
+                        except ValueError:
+                            additions, deletions = self._count_changes_from_diff(file_path)
+                    else:
+                        additions, deletions = self._count_changes_from_diff(file_path)
+                else:
+                    additions, deletions = self._count_changes_from_diff(file_path)
+            except Exception:
+                additions, deletions = self._count_changes_from_diff(file_path)
+            
             total_additions += additions
             total_deletions += deletions
             
@@ -76,31 +139,79 @@ class GitAnalyzer:
                 "diff": diff_content
             })
         
-        # Check for new files in staging area
-        # Compare index to HEAD to find new files
-        try:
-            head_commit = self.repo.head.commit
-        except ValueError:
-            # No commits yet, all files are new
-            head_commit = None
+        # Fallback: if no changes found via git diff --cached, try GitPython
+        if not staged_files and has_commits:
+            try:
+                for item in self.repo.index.diff("HEAD"):
+                    file_path = item.a_path if item.a_path else item.b_path
+                    if file_path in processed_paths:
+                        continue
+                    processed_paths.add(file_path)
+                    
+                    change_type = self._get_change_type(item)
+                    
+                    # Get diff stats
+                    diff_index = self.repo.index.diff("HEAD", paths=[file_path])
+                    additions, deletions = self._count_changes(diff_index)
+                    total_additions += additions
+                    total_deletions += deletions
+                    
+                    # Get file type
+                    file_type = self._categorize_file(file_path)
+                    
+                    # Get diff content (truncated)
+                    diff_content = self._get_diff_content(file_path)
+                    
+                    staged_files.append({
+                        "path": file_path,
+                        "type": change_type,
+                        "file_type": file_type,
+                        "additions": additions,
+                        "deletions": deletions,
+                        "diff": diff_content
+                    })
+            except Exception:
+                pass
         
-        for item in self.repo.index.diff(head_commit):
-            if item.new_file:
-                file_path = item.a_path
-                if file_path in processed_paths:
+        # Check for new files in staging area
+        # For fresh repos, all files in index are new
+        # For existing repos, compare index to HEAD
+        if not has_commits:
+            # Fresh repository - all files in index are new
+            # Use git command to get staged files
+            try:
+                result = subprocess.run(
+                    ['git', 'diff', '--cached', '--name-only'],
+                    capture_output=True,
+                    text=True,
+                    check=True
+                )
+                staged_file_paths = [line.strip() for line in result.stdout.split('\n') if line.strip()]
+            except:
+                # Fallback: try to get from index entries
+                try:
+                    staged_file_paths = list(self.repo.index.entries.keys())
+                except:
+                    staged_file_paths = []
+            
+            for file_path in staged_file_paths:
+                # Ensure file_path is a string
+                if isinstance(file_path, tuple):
+                    file_path = file_path[0] if file_path else ""
+                if not file_path or file_path in processed_paths:
                     continue
                 processed_paths.add(file_path)
                 
                 # Count lines in new file
                 try:
                     blob = self.repo.index[file_path]
-                    additions = blob.size // 80  # Rough estimate, or count actual lines
-                    # Better: get actual content
+                    # Get actual content
                     try:
                         content = blob.data_stream.read().decode('utf-8', errors='ignore')
                         additions = len([l for l in content.split('\n') if l.strip()])
                     except:
-                        additions = blob.size // 80
+                        # Fallback estimate
+                        additions = blob.size // 80 if blob.size > 0 else 0
                 except:
                     # Fallback: read from filesystem
                     try:
@@ -120,6 +231,47 @@ class GitAnalyzer:
                     "deletions": 0,
                     "diff": self._get_new_file_diff(file_path)
                 })
+        else:
+            # Existing repository - check for new files by comparing index to HEAD
+            try:
+                for item in self.repo.index.diff(head_commit):
+                    if hasattr(item, 'new_file') and item.new_file:
+                        file_path = item.a_path
+                        if file_path in processed_paths:
+                            continue
+                        processed_paths.add(file_path)
+                        
+                        # Count lines in new file
+                        try:
+                            blob = self.repo.index[file_path]
+                            # Get actual content
+                            try:
+                                content = blob.data_stream.read().decode('utf-8', errors='ignore')
+                                additions = len([l for l in content.split('\n') if l.strip()])
+                            except:
+                                # Fallback estimate
+                                additions = blob.size // 80 if blob.size > 0 else 0
+                        except:
+                            # Fallback: read from filesystem
+                            try:
+                                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                                    additions = len(f.readlines())
+                            except:
+                                additions = 0
+                        
+                        total_additions += additions
+                        file_type = self._categorize_file(file_path)
+                        
+                        staged_files.append({
+                            "path": file_path,
+                            "type": "added",
+                            "file_type": file_type,
+                            "additions": additions,
+                            "deletions": 0,
+                            "diff": self._get_new_file_diff(file_path)
+                        })
+            except Exception:
+                pass
         
         return {
             "files": staged_files,
@@ -153,6 +305,27 @@ class GitAnalyzer:
                     deletions += 1
         
         return additions, deletions
+    
+    def _count_changes_from_diff(self, file_path: str) -> Tuple[int, int]:
+        """Count additions and deletions from git diff --cached for a file"""
+        try:
+            result = subprocess.run(
+                ['git', 'diff', '--cached', file_path],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=10
+            )
+            additions = 0
+            deletions = 0
+            for line in result.stdout.split('\n'):
+                if line.startswith('+') and not line.startswith('+++'):
+                    additions += 1
+                elif line.startswith('-') and not line.startswith('---'):
+                    deletions += 1
+            return additions, deletions
+        except Exception:
+            return 0, 0
     
     def _categorize_file(self, file_path: str) -> str:
         """Categorize file by type"""
@@ -233,20 +406,32 @@ class GitAnalyzer:
     def has_staged_changes(self) -> bool:
         """Check if there are any staged changes"""
         try:
-            # Check for staged changes against HEAD
-            if len(self.repo.index.diff("HEAD")) > 0:
-                return True
-            # Check for new files in index
+            # Check if there are any files in the index
+            if len(self.repo.index.entries) == 0:
+                return False
+            
+            # Check if this is a fresh repository with no commits
             try:
                 head_commit = self.repo.head.commit
-            except ValueError:
-                # No commits yet, check if index has any files
+                has_commits = True
+            except (ValueError, git.BadName):
+                # No commits yet, if index has files, they're staged
                 return len(self.repo.index.entries) > 0
             
-            # Check for new files by comparing index to HEAD
-            for item in self.repo.index.diff(head_commit):
-                if item.new_file:
+            # For repos with commits, check for differences
+            try:
+                # Check for staged changes against HEAD
+                if len(self.repo.index.diff("HEAD")) > 0:
                     return True
+                
+                # Check for new files by comparing index to HEAD
+                for item in self.repo.index.diff(head_commit):
+                    if hasattr(item, 'new_file') and item.new_file:
+                        return True
+            except Exception:
+                # If diff fails, check if index has entries
+                return len(self.repo.index.entries) > 0
+            
             return False
         except Exception:
             return False
@@ -272,32 +457,75 @@ def load_config() -> Dict:
 
 
 class CommitMessageGenerator:
-    """Generates commit messages using OpenAI"""
+    """Generates commit messages using OpenAI or Groq"""
     
-    def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None):
+    def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None, provider: str = "openai"):
         config = load_config()
         
+        self.provider = provider or config.get("provider", "openai")
+        
         # Priority: explicit parameter > env var > config file
-        api_key = api_key or os.getenv("OPENAI_API_KEY") or config.get("api_key")
-        model = model or config.get("model", "gpt-4")
+        if self.provider == "groq":
+            api_key = api_key or os.getenv("GROQ_API_KEY") or config.get("groq_api_key")
+            # Use newer model names - these are currently available
+            default_model = "llama-3.1-8b-instant"  # Current default
+            # Groq models - current available models (as of 2024)
+            groq_models = ["llama-3.1-8b-instant", "llama-3.1-70b-versatile", "llama-3.3-70b-versatile",
+                          "mixtral-8x7b-32768", "gemma-7b-it", "llama-3.2-3b-instruct"]
+            # Map old/deprecated names to current ones
+            model_mapping = {
+                "llama3-8b-8192": "llama-3.1-8b-instant",
+                "llama3-70b-8192": "llama-3.1-70b-versatile",
+                "llama3-8b": "llama-3.1-8b-instant",
+                "llama3-70b": "llama-3.1-70b-versatile"
+            }
+            # If user specified a mapped model name, use the current one
+            if model and model in model_mapping:
+                console.print(f"[yellow]Note: '{model}' is deprecated. Using '{model_mapping[model]}' instead.[/yellow]")
+                model = model_mapping[model]
+            # If user specified an OpenAI model or unknown model, use default Groq model
+            elif model and model not in groq_models and not any(model.startswith(prefix) for prefix in ["llama", "mixtral", "gemma"]):
+                console.print(f"[yellow]Warning: '{model}' is not a Groq model. Using default Groq model instead.[/yellow]")
+                model = default_model
+            # If no model specified, use default or from config (but only if it's a Groq model)
+            if not model:
+                config_model = config.get("model")
+                if config_model and config_model in groq_models:
+                    model = config_model
+                else:
+                    model = default_model
+        else:
+            api_key = api_key or os.getenv("OPENAI_API_KEY") or config.get("api_key")
+            default_model = "gpt-4"
+            model = model or config.get("model", default_model)
         
         if not api_key:
-            console.print("[red]Error: OpenAI API key not found[/red]")
-            console.print("[yellow]Set it via one of:")
-            console.print("  1. Environment variable: export OPENAI_API_KEY='your-key-here'")
-            console.print("  2. Config file: ~/.smart_commit_config or .smart_commit_config")
-            console.print("     Format: {\"api_key\": \"your-key-here\", \"model\": \"gpt-4\"}[/yellow]")
+            if self.provider == "groq":
+                console.print("[red]Error: Groq API key not found[/red]")
+                console.print("[yellow]Get a free API key at: https://console.groq.com/keys[/yellow]")
+                console.print("[yellow]Then set: export GROQ_API_KEY='your-key-here'[/yellow]")
+            else:
+                console.print("[red]Error: OpenAI API key not found[/red]")
+                console.print("[yellow]Set it via one of:[/yellow]")
+                console.print("[yellow]  1. Environment variable: export OPENAI_API_KEY='your-key-here'[/yellow]")
+                console.print("[yellow]  2. Config file: ~/.smart_commit_config or .smart_commit_config[/yellow]")
+                console.print("[yellow]     Format: {\"api_key\": \"your-key-here\", \"model\": \"gpt-4\"}[/yellow]")
             sys.exit(1)
         
         if not api_key.strip():
-            console.print("[red]Error: OpenAI API key is empty[/red]")
+            console.print(f"[red]Error: {self.provider.upper()} API key is empty[/red]")
             sys.exit(1)
         
         try:
-            self.client = OpenAI(api_key=api_key)
+            if self.provider == "groq":
+                # Groq uses OpenAI-compatible API
+                from openai import OpenAI
+                self.client = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
+            else:
+                self.client = OpenAI(api_key=api_key)
             self.model = model
         except Exception as e:
-            console.print(f"[red]Error initializing OpenAI client: {e}[/red]")
+            console.print(f"[red]Error initializing {self.provider.upper()} client: {e}[/red]")
             sys.exit(1)
     
     def generate_message(self, changes: Dict) -> str:
@@ -330,14 +558,46 @@ class CommitMessageGenerator:
             
             return response.choices[0].message.content.strip()
         except Exception as e:
-            if "rate limit" in str(e).lower():
-                console.print("[red]Error: OpenAI API rate limit exceeded. Please try again later.[/red]")
-            elif "authentication" in str(e).lower() or "api key" in str(e).lower():
-                console.print("[red]Error: Invalid OpenAI API key. Check your OPENAI_API_KEY environment variable.[/red]")
-            elif "model" in str(e).lower():
-                console.print(f"[red]Error: Invalid model '{self.model}'. Available models: gpt-4, gpt-3.5-turbo, etc.[/red]")
+            error_str = str(e).lower()
+            error_msg = str(e)
+            
+            if "rate limit" in error_str:
+                console.print("[red]Error: API rate limit exceeded. Please try again later.[/red]")
+            elif "quota" in error_str or "insufficient_quota" in error_str or "billing" in error_str:
+                if self.provider == "groq":
+                    console.print("[red]Error: Groq API quota exceeded.[/red]")
+                    console.print("[yellow]Check your Groq account at: https://console.groq.com[/yellow]")
+                else:
+                    console.print("[red]Error: OpenAI API quota exceeded or insufficient credits.[/red]")
+                    console.print("[yellow]Please check your OpenAI account billing and add credits at:[/yellow]")
+                    console.print("[yellow]https://platform.openai.com/account/billing[/yellow]")
+            elif "authentication" in error_str or "api key" in error_str or "invalid api key" in error_str:
+                if self.provider == "groq":
+                    console.print("[red]Error: Invalid Groq API key. Check your GROQ_API_KEY environment variable.[/red]")
+                else:
+                    console.print("[red]Error: Invalid OpenAI API key. Check your OPENAI_API_KEY environment variable.[/red]")
+            elif "model" in error_str or "not found" in error_str or "does not exist" in error_str or "decommissioned" in error_str:
+                console.print(f"[red]Error: Model '{self.model}' not available or has been decommissioned.[/red]")
+                if self.provider == "groq":
+                    if "decommissioned" in error_str:
+                        console.print("[yellow]This model has been decommissioned. Using current models:[/yellow]")
+                    else:
+                        console.print("[yellow]Available Groq models:[/yellow]")
+                    console.print("[yellow]  - llama-3.1-8b-instant (fast, recommended)[/yellow]")
+                    console.print("[yellow]  - llama-3.1-70b-versatile (more capable)[/yellow]")
+                    console.print("[yellow]  - llama-3.3-70b-versatile (latest)[/yellow]")
+                    console.print("[yellow]  - mixtral-8x7b-32768 (good balance)[/yellow]")
+                    console.print("[yellow]  - gemma-7b-it (alternative)[/yellow]")
+                    console.print("[yellow]Try: --provider groq --model llama-3.1-8b-instant[/yellow]")
+                    console.print("[yellow]Check deprecations: https://console.groq.com/docs/deprecations[/yellow]")
+                    console.print(f"[dim]Full error: {error_msg}[/dim]")
+                else:
+                    console.print("[yellow]Try using: --model gpt-3.5-turbo[/yellow]")
             else:
-                console.print(f"[red]Error calling OpenAI API: {e}[/red]")
+                console.print(f"[red]Error calling {self.provider.upper()} API: {e}[/red]")
+                # Show full error for debugging
+                if self.provider == "groq":
+                    console.print(f"[dim]Full error details: {error_msg}[/dim]")
             sys.exit(1)
     
     def _build_prompt(self, changes: Dict) -> str:
@@ -395,7 +655,7 @@ class CommitMessageGenerator:
                     if len(file_info["diff"].split('\n')) > 40:
                         prompt_parts.append("... (truncated)")
         
-        prompt_parts.append(
+        prompt_parts.extend([
             "\n\n=== INSTRUCTIONS ===",
             "Generate a commit message with:",
             "1. Title line (50-72 chars): Use format '[type]: brief description'",
@@ -412,16 +672,17 @@ class CommitMessageGenerator:
             "- perf: Performance improvements",
             "",
             "Be specific and descriptive. Focus on what changed and why it matters."
-        )
+        ])
         
         return '\n'.join(prompt_parts)
 
 
 @click.command()
-@click.option('--model', default='gpt-4', help='OpenAI model to use (default: gpt-4)')
+@click.option('--model', default=None, help='Model to use (default depends on provider)')
+@click.option('--provider', type=click.Choice(['openai', 'groq'], case_sensitive=False), default='openai', help='API provider: openai or groq (default: openai)')
 @click.option('--auto-commit', is_flag=True, help='Automatically commit without confirmation')
 @click.option('--no-preview', is_flag=True, help='Skip preview and commit directly')
-def main(model: str, auto_commit: bool, no_preview: bool):
+def main(model: Optional[str], provider: str, auto_commit: bool, no_preview: bool):
     """Smart Commit - Auto-generate commit messages from staged changes"""
     
     # Check for staged changes
@@ -473,9 +734,11 @@ def main(model: str, auto_commit: bool, no_preview: bool):
                          f"([green]+{file_info['additions']}[/green]/[red]-{file_info['deletions']}[/red])")
     
     # Generate commit message
-    console.print("\n[cyan]Generating commit message with OpenAI ({model})...[/cyan]")
+    provider_name = provider.upper() if provider else "OpenAI"
+    model_display = model or ("default" if provider == "groq" else "gpt-4")
+    console.print(f"\n[cyan]Generating commit message with {provider_name} ({model_display})...[/cyan]")
     try:
-        generator = CommitMessageGenerator(model=model)
+        generator = CommitMessageGenerator(model=model, provider=provider)
         commit_message = generator.generate_message(changes)
     except KeyboardInterrupt:
         console.print("\n[yellow]Cancelled by user[/yellow]")
