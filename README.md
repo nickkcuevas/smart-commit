@@ -14,22 +14,71 @@ A Python CLI tool that automatically generates descriptive commit messages by an
 
 ## Installation
 
+### Option 1: Install as a command (Recommended)
+
+Install the tool so you can run it from anywhere:
+
+```bash
+# From the project directory
+pip install -e .
+
+# Now you can use it from anywhere (Groq is the default):
+smart-commit
+# or explicitly: smart-commit --provider groq
+```
+
+### Option 2: Simple executable (No installation)
+
 1. Install dependencies:
 ```bash
 pip install -r requirements.txt
 ```
 
-2. Set up your API key (choose one):
+2. Make the script executable (if not already):
+```bash
+chmod +x smart_commit.py
+```
 
-**Option A: Groq (FREE, recommended for testing)**
+3. Run it directly (Groq is now the default):
+```bash
+./smart_commit.py
+# or explicitly: ./smart_commit.py --provider groq
+```
+
+### Option 3: Create an alias (Quick access)
+
+Add to your `~/.zshrc` or `~/.bashrc`:
+
+```bash
+# For zsh
+alias smart-commit='/path/to/hackaton/smart_commit.py'
+
+# Or if using virtual environment:
+alias smart-commit='source /path/to/hackaton/venv/bin/activate && /path/to/hackaton/smart_commit.py'
+```
+
+Then reload your shell:
+```bash
+source ~/.zshrc  # or source ~/.bashrc
+```
+
+Now you can use:
+```bash
+smart-commit --provider groq
+```
+
+### Set up your API key (choose one):
+
+**Option A: Groq (FREE, default provider)**
 ```bash
 # Get free API key at: https://console.groq.com/keys
 export GROQ_API_KEY='your-groq-key-here'
 ```
 
-**Option B: OpenAI (paid)**
+**Option B: OpenAI (paid, use --provider openai)**
 ```bash
 export OPENAI_API_KEY='your-openai-key-here'
+# Then use: smart-commit --provider openai
 ```
 
 Or create a config file at `~/.smart_commit_config` or `.smart_commit_config`:
@@ -52,7 +101,13 @@ git add .
 
 2. Run smart-commit:
 ```bash
+# If installed as command:
+smart-commit
+
+# Or if using directly:
 python smart_commit.py
+# or
+./smart_commit.py
 ```
 
 3. Review the generated message and choose to:
@@ -64,11 +119,13 @@ python smart_commit.py
 ### Command Line Options
 
 ```bash
+smart-commit [OPTIONS]
+# or
 python smart_commit.py [OPTIONS]
 
 Options:
   --model TEXT        Model to use (default depends on provider)
-  --provider TEXT     API provider: openai or groq (default: openai)
+  --provider TEXT     API provider: openai or groq (default: groq)
   --auto-commit       Automatically commit without confirmation
   --no-preview        Skip preview and commit directly
   --help              Show this message and exit
@@ -77,20 +134,21 @@ Options:
 ### Examples
 
 ```bash
-# Use Groq (FREE!)
-python smart_commit.py --provider groq
+# Use Groq (default, FREE!)
+smart-commit
+# or explicitly: smart-commit --provider groq
 
 # Use a specific Groq model
-python smart_commit.py --provider groq --model llama-3.1-70b-versatile
+smart-commit --model llama-3.1-70b-versatile
 
-# Use OpenAI with a different model
-python smart_commit.py --provider openai --model gpt-3.5-turbo
+# Use OpenAI instead
+smart-commit --provider openai --model gpt-3.5-turbo
 
 # Auto-commit without confirmation
-python smart_commit.py --auto-commit
+smart-commit --auto-commit
 
 # Skip preview
-python smart_commit.py --no-preview
+smart-commit --no-preview
 ```
 
 ## Configuration
@@ -119,7 +177,7 @@ Create `~/.smart_commit_config` (user-level) or `.smart_commit_config` (project-
   "model": "llama-3.1-8b-instant"
 }
 
-**For OpenAI:**
+**For OpenAI (if you want to use OpenAI instead of Groq):**
 ```json
 {
   "provider": "openai",
