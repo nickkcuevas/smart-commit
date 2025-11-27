@@ -459,10 +459,10 @@ def load_config() -> Dict:
 class CommitMessageGenerator:
     """Generates commit messages using OpenAI or Groq"""
     
-    def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None, provider: str = "openai"):
+    def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None, provider: str = "groq"):
         config = load_config()
         
-        self.provider = provider or config.get("provider", "openai")
+        self.provider = provider or config.get("provider", "groq")
         
         # Priority: explicit parameter > env var > config file
         if self.provider == "groq":
@@ -679,7 +679,7 @@ class CommitMessageGenerator:
 
 @click.command()
 @click.option('--model', default=None, help='Model to use (default depends on provider)')
-@click.option('--provider', type=click.Choice(['openai', 'groq'], case_sensitive=False), default='openai', help='API provider: openai or groq (default: openai)')
+@click.option('--provider', type=click.Choice(['openai', 'groq'], case_sensitive=False), default='groq', help='API provider: openai or groq (default: groq)')
 @click.option('--auto-commit', is_flag=True, help='Automatically commit without confirmation')
 @click.option('--no-preview', is_flag=True, help='Skip preview and commit directly')
 def main(model: Optional[str], provider: str, auto_commit: bool, no_preview: bool):
@@ -855,6 +855,10 @@ def main(model: Optional[str], provider: str, auto_commit: bool, no_preview: boo
             console.print(f"[red]Unexpected error: {e}[/red]")
             sys.exit(1)
 
+
+def cli():
+    """Entry point for console script"""
+    main()
 
 if __name__ == "__main__":
     main()
