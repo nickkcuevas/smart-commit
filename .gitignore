@@ -15,6 +15,13 @@ ENV/
 # Virtual environment (project-specific)
 venv/
 
+# Python build artifacts
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+__pycache__/
+
 # IDE
 .vscode/
 .idea/
